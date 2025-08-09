@@ -20,18 +20,20 @@ import json
 import time
 import uuid
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple, Set, Any
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pydantic import Field
 
-from hummingbot.core.data_type.common import MarketDict, OrderType, PositionSide, TradeType
-from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
-from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TripleBarrierConfig, TrailingStop
-from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
-from hummingbot.core.data_type.common import PriceType
-from hummingbot.remote_iface.mqtt import ExternalTopicFactory
-from hummingbot.remote_iface.mqtt import MQTTGateway
 from hummingbot.client.config.config_helpers import load_client_config_map_from_file
+from hummingbot.core.data_type.common import MarketDict, OrderType, PositionSide, PriceType, TradeType
+from hummingbot.remote_iface.mqtt import ExternalEventFactory, ExternalTopicFactory
+from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
+from hummingbot.strategy_v2.executors.position_executor.data_types import (
+    PositionExecutorConfig,
+    TrailingStop,
+    TripleBarrierConfig,
+)
+from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
 
 
 class SignalExecutorConfig(ControllerConfigBase):
@@ -123,7 +125,6 @@ class SignalExecutorController(ControllerBase):
         self._reconnect_delay = 1  # Initial delay in seconds
         # Initialize signal listener queue-based listener
         self._initialize_signal_listener()
-        
 
     def _stop_mqtt(self):
         """Stop MQTT bridge"""
@@ -171,7 +172,7 @@ class SignalExecutorController(ControllerBase):
     def _handle_received_signal(self, signal: dict, topic: str):
         """Handle received signal """
         self.logger().info(f"Received signal on topic {topic}: {signal}")
-    
+
         if self._mqtt_topic_queue is not None:
             self.queue_add = self.queue_add + 1
             # Add signal to the queue for processing
@@ -179,7 +180,7 @@ class SignalExecutorController(ControllerBase):
             self._mqtt_topic_queue.append((topic, signal))
         else:
             self.logger().error("Signal receiving queue is not initialized. Cannot process signal.")
-            
+
     # ------------------------------------------------------------------ #
     # Queue-based signal processing                                      #
     # ------------------------------------------------------------------ #
@@ -192,7 +193,7 @@ class SignalExecutorController(ControllerBase):
                 topic, signal = entry
                 self.logger().info(f"Processing received signal from topic {topic}")
                 self.logger().debug(f"Signal content: {signal}")
-                
+
                 # Process the signal using the existing signal handling logic
                 asyncio.create_task(self._handle_signal(signal))
 
@@ -239,7 +240,7 @@ class SignalExecutorController(ControllerBase):
                 self.logger().info("MQTT Bridge stopped successfully")
             else:
                 self.logger().info("MQTT Bridge is not running")
-                
+
         except Exception as e:
             self.logger().warning(f"Failed to stop MQTT Bridge automatically: {str(e)}")
 
@@ -266,14 +267,14 @@ class SignalExecutorController(ControllerBase):
         try:
             self._heartbeat_counter += 1
             current_time = time.time()
-        
+
             # Log heartbeat periodically
             if (self._heartbeat_counter % self.config.heartbeat_interval == 0 or
                     current_time - self._last_heartbeat_time >= self.config.heartbeat_time_interval):
                 self.logger().info(f"SignalExecutorController heartbeat - running (iteration {self._heartbeat_counter})")
                 self.logger().info(f"Signal queue status: {'Connected' if self._mqtt_topic_queue is not None else 'Disconnected'}")
                 self._last_heartbeat_time = current_time
-                
+
             # Process MQTT messages from the queue
             self.process_mqtt_messages()
         except Exception as e:
@@ -297,18 +298,18 @@ class SignalExecutorController(ControllerBase):
             and not ex.is_done
             for ex in self.executors_info
         )
-        
+
     def _check_paper_trade_connector(self) -> bool:
         """Check if using paper trade connector and log warning once"""
         is_paper_trade = "paper_trade" in self.config.connector_name.lower()
-        
+
         if is_paper_trade and not self._paper_trade_warning_logged:
             self.logger().warning(
                 f"Using paper trade connector which may not have trading_rules. "
                 f"This might cause issues with the position executor."
             )
             self._paper_trade_warning_logged = True
-            
+
             # Check if the connector has trading_rules attribute
             connector = self._market_data_provider.get_connector(self.config.connector_name)
             if not hasattr(connector, "trading_rules"):
@@ -318,18 +319,18 @@ class SignalExecutorController(ControllerBase):
                     f"Consider using a different connector or adding trading_rules to the connector."
                 )
                 return False
-                
+
         return True
-        
+
     def _generate_signal_hash(self, signal: dict) -> str:
         """Generate a unique hash for a signal to detect duplicates"""
         sig_json = json.dumps(signal, sort_keys=True, separators=(",", ":"))
         return hashlib.md5(sig_json.encode()).hexdigest()[:8]
-        
+
     def _is_duplicate_signal(self, sig_hash: str) -> bool:
         """Check if a signal is a duplicate"""
         return any(k.endswith(f"_{sig_hash}") for k in self._registry)
-        
+
     # ------------------------------------------------------------------ #
     # Signal validation and processing                                   #
     # ------------------------------------------------------------------ #
@@ -339,24 +340,24 @@ class SignalExecutorController(ControllerBase):
         for field in required_fields:
             if field not in signal:
                 return False, f"Missing required field: {field}"
-                
+
         try:
             pair = signal["trading_pair"]
             if not pair:
                 return False, "Empty trading_pair"
-                
+
             side = signal["side"].upper()
             if side not in ["BUY", "SELL"]:
                 return False, f"Invalid side: {side}"
-                
+
             buy_low, buy_high = map(Decimal, signal["buy_range"])
             if not buy_low or not buy_high or buy_low >= buy_high:
                 return False, f"Invalid buy range: {signal['buy_range']}"
-                
+
             sl_price = Decimal(str(signal["stop_loss"]))
             if sl_price is None or sl_price <= 0:
                 return False, f"Invalid stop loss price: {sl_price}"
-                
+
             # Direction-aware stop loss validation
             if side == "BUY":
                 if sl_price >= buy_low:
@@ -364,14 +365,14 @@ class SignalExecutorController(ControllerBase):
             else:  # SELL
                 if sl_price <= buy_high:
                     return False, f"Stop loss must be above buy range for SELL: {sl_price} <= {buy_high}"
-                
+
             tp_prices = [Decimal(str(p)) for p in signal["take_profits"]]
             if not tp_prices or len(tp_prices) < 2:
                 return False, f"Invalid take profit input: {tp_prices}"
-                
+
             tp1 = tp_prices[0]
             tp2 = tp_prices[1]
-            
+
             # Direction-aware take profit validation
             if side == "BUY":
                 if tp1 <= buy_high or tp2 <= tp1:
@@ -379,16 +380,16 @@ class SignalExecutorController(ControllerBase):
             else:  # SELL
                 if tp1 >= buy_low or tp2 >= tp1:
                     return False, f"Invalid take profit levels for SELL: {tp_prices}"
-                
+
             ttl = int(signal["trading_time"])
             if not ttl or ttl <= 0:
                 return False, f"Invalid trading time: {ttl}"
-                
+
         except (ValueError, TypeError) as e:
             return False, f"Data type error: {str(e)}"
-            
+
         return True, "Valid signal"
-        
+
     def _calculate_position_parameters(self, signal: dict) -> dict:
         """Calculate position parameters from signal"""
         buy_low, buy_high = map(Decimal, signal["buy_range"])
@@ -396,18 +397,18 @@ class SignalExecutorController(ControllerBase):
         tp_prices = [Decimal(str(p)) for p in signal["take_profits"]]
         tp1 = tp_prices[0]
         tp2 = tp_prices[1]
-        
+
         # Calculate percentages relative to buy_high
         tp1_percentage = (tp1 - buy_high) / buy_high
         tp2_percentage = (tp2 - buy_high) / buy_high
         sl_percentage = abs((sl_price - buy_high) / buy_high)
-        
+
         # Calculate position size and entry price
         position_size = self.config.position_size_usd / buy_high
         entry_price = (buy_low + buy_high) / Decimal("2")
         half_span = (buy_high - buy_low) / Decimal("2")
         activation_pct = half_span / entry_price
-        
+
         return {
             "position_size": position_size,
             "entry_price": entry_price,
@@ -416,46 +417,52 @@ class SignalExecutorController(ControllerBase):
             "tp2_percentage": tp2_percentage,
             "sl_percentage": sl_percentage
         }
-        
+
     # ------------------------------------------------------------------ #
     # Signal handlers                                                    #
     # ------------------------------------------------------------------ #
     async def _handle_signal(self, signal: dict) -> None:
         current_time = time.time()
         self.logger().info(f"Received signal: {signal}")
-        
+
         # Check max open trades
         if self._max_open_trades_reached():
             self.logger().info(f"Max number of active traders reached ({self.config.max_open_trades}) – skipping signal")
             return
-            
+
         # Check for duplicate signal
         sig_hash = self._generate_signal_hash(signal)
         if self._is_duplicate_signal(sig_hash):
             self.logger().info(f"Duplicate signal (hash={sig_hash}) – skipped")
             return
-            
+
         # Check paper trade connector
         if not self._check_paper_trade_connector():
             return
-            
+
         # Validate signal
         is_valid, error_msg = self._validate_signal(signal)
         if not is_valid:
             self.logger().error(f"Invalid signal: {error_msg} in signal: {signal}")
             return
-            
+
         try:
             pair = signal["trading_pair"]
+
+            # Check if pair is supported
+            if pair not in self._market_data_provider.get_trading_pairs(self.config.connector_name):
+                self.logger().info(f"Trading pair {pair} is not supported – skipping signal")
+                return
             
             # Check if pair is already being traded
             if self._pair_already_trading(pair):
                 self.logger().info(f"Executor for {pair} already active – skipping duplicate pair signal")
                 return
 
+
             # Calculate position parameters
             params = self._calculate_position_parameters(signal)
-            
+
             # Create triple barrier config
             tp_barrier = TripleBarrierConfig(
                 stop_loss=params["sl_percentage"],
@@ -471,10 +478,10 @@ class SignalExecutorController(ControllerBase):
                 time_limit_order_type=OrderType.MARKET,
                 partial_take_profit=self.config.partial_take_profit_ratio,
             )
-            
+
             # Create unique key for this position
             level_key = f"{pair}_tp2_trailing_{current_time}_{sig_hash}"
-            
+
             # Create position executor config
             side = TradeType.BUY if signal["side"].upper() == "BUY" else TradeType.SELL
             cfg = PositionExecutorConfig(
@@ -489,7 +496,7 @@ class SignalExecutorController(ControllerBase):
                 activation_bounds=[params["activation_pct"], params["activation_pct"]],
                 level_id=level_key
             )
-            
+
             # Register this executor
             self._registry[level_key] = cfg
             self.logger().info(
@@ -498,15 +505,15 @@ class SignalExecutorController(ControllerBase):
                 f"trailing delta: {params['tp1_percentage'] * 100}%, "
                 f"time limit: {self.config.time_limit_seconds} seconds"
             )
-            
+
         except Exception as e:
             self.logger().error(f"Error processing signal: {signal} -> {e}", exc_info=True)
-
 
     # ------------------------------------------------------------------ #
     # Executor actions                                                   #
     # Called by the control loop to determine actions to take            #
     # ------------------------------------------------------------------ #
+
     def determine_executor_actions(self) -> List[CreateExecutorAction]:
         actions: List[CreateExecutorAction] = []
 
@@ -517,7 +524,7 @@ class SignalExecutorController(ControllerBase):
                 if level_id in self._registry:
                     del self._registry[level_id]
                     self.logger().info(f"Cleaned registry for closed executor {level_id}")
-                        
+
         # Create new actions for still-active configs
         for level_id, cfg in list(self._registry.items()):
             if not any(ex.config.level_id == level_id for ex in self.executors_info):
