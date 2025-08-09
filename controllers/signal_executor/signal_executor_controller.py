@@ -105,6 +105,36 @@ class SignalExecutorConfig(ControllerConfigBase):
         return markets
 
 
+class SignalExecutorInternalConfig:
+    def __init__(
+        self,
+        reference_payload: dict = None,
+        max_payload_size_factor: int = 4
+    ):
+        if reference_payload is None:
+            reference_payload = {
+                "trading_pair": "BTC-USDT",
+                "side": "SELL",
+                "buy_range": ["42000", "42500"],
+                "stop_loss": "43000",
+                "take_profits": ["41500", "41000", "40500", "40000", "39500"],
+                "trading_time": 1800
+            }
+        self.reference_payload = reference_payload
+        self.max_payload_size_factor = max_payload_size_factor
+
+    @property
+    def max_payload_size(self) -> int:
+        import json
+        ref_size = len(json.dumps(self.reference_payload).encode("utf-8"))
+        return self.max_payload_size_factor * ref_size
+
+    def is_payload_size_valid(self, payload: dict) -> bool:
+        import json
+        payload_size = len(json.dumps(payload).encode("utf-8"))
+        return payload_size <= self.max_payload_size
+
+
 class SignalExecutorController(ControllerBase):
     def __init__(self, config: SignalExecutorConfig, market_data_provider=None, actions_queue=None):
         super().__init__(config, market_data_provider, actions_queue)
@@ -113,6 +143,9 @@ class SignalExecutorController(ControllerBase):
         self._market_data_provider = market_data_provider
         self._actions_queue = actions_queue
         self._paper_trade_warning_logged = False
+
+        # Internal config for payload size validation
+        self._internal_config = SignalExecutorInternalConfig()
 
         # MQTT consumer state variables
         self._mqtt_topic_queue = None
@@ -171,6 +204,13 @@ class SignalExecutorController(ControllerBase):
 
     def _handle_received_signal(self, signal: dict, topic: str):
         """Handle received signal """
+        # Validate payload size before adding to queue
+        if not self._internal_config.is_payload_size_valid(signal):
+            self.logger().error(
+                f"Received signal payload size exceeds max allowed {self._internal_config.max_payload_size} bytes. Signal ignored."
+            )
+            return
+
         self.logger().info(f"Received signal on topic {topic}: {signal}")
 
         if self._mqtt_topic_queue is not None:
