@@ -33,7 +33,7 @@ from hummingbot.strategy_v2.executors.position_executor.data_types import (
     TrailingStop,
     TripleBarrierConfig,
 )
-from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
+from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction , StopExecutorAction
 
 
 class SignalExecutorConfig(ControllerConfigBase):
@@ -70,19 +70,19 @@ class SignalExecutorConfig(ControllerConfigBase):
             "prompt_on_new": True}
     )
     heartbeat_interval: int = Field(
-        default=100,
+        default=100,    # 100 iterations default      
         json_schema_extra={
             "prompt": "Heartbeat log interval (iterations): ",
             "prompt_on_new": True}
     )
     heartbeat_time_interval: int = Field(
-        default=60,
+        default=60, # 60 seconds default
         json_schema_extra={
             "prompt": "Heartbeat log interval (seconds): ",
             "prompt_on_new": True}
     )
     time_limit_seconds: int = Field(
-        default=172800,
+        default=172800, # 2 days default
         json_schema_extra={
             "prompt": "Position time limit in seconds (default 172800 = 2 days): ",
             "prompt_on_new": True}
@@ -91,6 +91,13 @@ class SignalExecutorConfig(ControllerConfigBase):
         default=Decimal("1"),
         json_schema_extra={
             "prompt": "Partial take profit ratio (1.0 = 100%, 0.5 = 50%): ",
+            "prompt_on_new": True}
+    )
+    
+    position_max_initial_idle_time: int = Field(
+        default=14400,  # 4 hours default
+        json_schema_extra={
+            "prompt": "Max seconds allowed before cancelling a position that never traded: ",
             "prompt_on_new": True}
     )
 
@@ -111,17 +118,23 @@ class SignalExecutorInternalConfig:
         reference_payload: dict = None,
         max_payload_size_factor: int = 4
     ):
-        if reference_payload is None:
-            reference_payload = {
-                "trading_pair": "BTC-USDT",
-                "side": "SELL",
-                "buy_range": ["42000", "42500"],
-                "stop_loss": "43000",
-                "take_profits": ["41500", "41000", "40500", "40000", "39500"],
-                "trading_time": 1800
-            }
-        self.reference_payload = reference_payload
-        self.max_payload_size_factor = max_payload_size_factor
+    """
+    Internal configuration for payload size validation.
+    :param reference_payload: A sample payload to calculate the max size.
+    :param max_payload_size_factor: Factor to multiply the reference payload size.
+    """
+    # Default reference payload if not provided
+    if reference_payload is None:
+        reference_payload = {
+            "trading_pair": "BTC-USDT",
+            "side": "SELL",
+            "buy_range": ["42000", "42500"],
+            "stop_loss": "43000",
+            "take_profits": ["41500", "41000", "40500", "40000", "39500"],
+            "trading_time": 1800
+        }
+    self.reference_payload = reference_payload
+    self.max_payload_size_factor = max_payload_size_factor
 
     @property
     def max_payload_size(self) -> int:
@@ -570,13 +583,31 @@ class SignalExecutorController(ControllerBase):
     def determine_executor_actions(self) -> List[CreateExecutorAction]:
         actions: List[CreateExecutorAction] = []
 
-        # Remove closed executors from registry
+        """Remove registry entries for closed positions or positions that never traded."""
+        now = time.time()
+        # Remove closed and idle executors from registry
         for ex in list(self.executors_info):
-            if ex.is_done:
-                level_id = ex.config.level_id
-                if level_id in self._registry:
-                    del self._registry[level_id]
-                    self.logger().info(f"Cleaned registry for closed executor {level_id}")
+            level_id = ex.config.level_id
+            # Case 1 – already closed
+            if ex.is_done and level_id in self._registry:
+                self._registry.pop(level_id, None)
+                self.logger().info(f"Cleaned registry for closed executor {level_id}")
+                continue
+    
+            # Case 2 – never traded and idle too long
+            idle_time = self.market_data_provider.time() - ex.timestamp
+            if not ex.is_trading and ex.is_active and idle_time > self.config.position_max_initial_idle_time:
+                self._registry.pop(level_id, None)
+                actions.append(StopExecutorAction(
+                     controller_id=self.config.id,
+                     keep_position=False,
+                     executor_id=ex.id
+                ))
+
+                self.logger().info(
+                    f"Cancelled never-traded position {level_id} "
+                    f"after {idle_time:.0f}s"
+                )
 
         # Create new actions for still-active configs
         for level_id, cfg in list(self._registry.items()):
