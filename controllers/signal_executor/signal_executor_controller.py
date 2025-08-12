@@ -118,23 +118,23 @@ class SignalExecutorInternalConfig:
         reference_payload: dict = None,
         max_payload_size_factor: int = 4
     ):
-    """
-    Internal configuration for payload size validation.
-    :param reference_payload: A sample payload to calculate the max size.
-    :param max_payload_size_factor: Factor to multiply the reference payload size.
-    """
-    # Default reference payload if not provided
-    if reference_payload is None:
-        reference_payload = {
-            "trading_pair": "BTC-USDT",
-            "side": "SELL",
-            "buy_range": ["42000", "42500"],
-            "stop_loss": "43000",
-            "take_profits": ["41500", "41000", "40500", "40000", "39500"],
-            "trading_time": 1800
-        }
-    self.reference_payload = reference_payload
-    self.max_payload_size_factor = max_payload_size_factor
+        """
+        Internal configuration for payload size validation.
+        :param reference_payload: A sample payload to calculate the max size.
+        :param max_payload_size_factor: Factor to multiply the reference payload size.
+        """
+        # Default reference payload if not provided
+        if reference_payload is None:
+            reference_payload = {
+                "trading_pair": "BTC-USDT",
+                "side": "SELL",
+                "buy_range": ["42000", "42500"],
+                "stop_loss": "43000",
+                "take_profits": ["41500", "41000", "40500", "40000", "39500"],
+                "trading_time": 1800
+            }
+        self.reference_payload = reference_payload
+        self.max_payload_size_factor = max_payload_size_factor
 
     @property
     def max_payload_size(self) -> int:
