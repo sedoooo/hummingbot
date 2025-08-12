@@ -156,9 +156,8 @@ class SignalExecutorController(ControllerBase):
         self._mqtt_reconnect_attempts = 0
         self._max_reconnect_attempts = 5
         self._reconnect_delay = 1  # Initial delay in seconds
-        # Initialize signal listener queue-based listener
-        self._initialize_signal_listener()
-
+        self._signal_listener = None
+        
     def _stop_mqtt(self):
         """Stop MQTT bridge"""
         if self._mqtt is not None:
@@ -300,6 +299,10 @@ class SignalExecutorController(ControllerBase):
         This method is called periodically by the control loop.
         We'll use it for heartbeat logging and Signal queue status monitoring.
         """
+        if self._market_data_provider.ready and self._signal_listener is None:
+            # Initialize signal listener queue-based listener
+            self._initialize_signal_listener()
+        
         if not self._first_heartbeat_logged:
             self.logger().info(f"SignalExecutorController first heartbeat - running (iteration 0)")
             self._first_heartbeat_logged = True
