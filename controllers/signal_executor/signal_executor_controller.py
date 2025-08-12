@@ -437,6 +437,7 @@ class SignalExecutorController(ControllerBase):
         """Calculate position parameters from signal"""
         buy_low, buy_high = map(Decimal, signal["buy_range"])
         sl_price = Decimal(str(signal["stop_loss"]))
+        ttl = int(signal["trading_time"])
         tp_prices = [Decimal(str(p)) for p in signal["take_profits"]]
         tp1 = tp_prices[0]
         tp2 = tp_prices[1]
@@ -444,11 +445,14 @@ class SignalExecutorController(ControllerBase):
         # Calculate percentages relative to buy_high
         tp1_percentage = (tp1 - buy_high) / buy_high
         tp2_percentage = (tp2 - buy_high) / buy_high
-        sl_percentage = abs((sl_price - buy_high) / buy_high)
-
+        
         # Calculate position size and entry price
         position_size = self.config.position_size_usd / buy_high
-        entry_price = (buy_low + buy_high) / Decimal("2")
+
+        mid_buy_range = (buy_low + buy_high) / Decimal("2")
+        sl_percentage = abs((sl_price - mid_buy_range) / mid_buy_range)
+        
+        entry_price = mid_buy_range
         half_span = (buy_high - buy_low) / Decimal("2")
         activation_pct = half_span / entry_price
 
@@ -458,7 +462,8 @@ class SignalExecutorController(ControllerBase):
             "activation_pct": activation_pct,
             "tp1_percentage": tp1_percentage,
             "tp2_percentage": tp2_percentage,
-            "sl_percentage": sl_percentage
+            "sl_percentage": sl_percentage,
+            "trading_time": ttl
         }
 
     # ------------------------------------------------------------------ #
@@ -510,7 +515,7 @@ class SignalExecutorController(ControllerBase):
             tp_barrier = TripleBarrierConfig(
                 stop_loss=params["sl_percentage"],
                 take_profit=params["tp2_percentage"],
-                time_limit=self.config.time_limit_seconds,
+                time_limit=params["trading_time"],
                 trailing_stop=TrailingStop(
                     activation_price=params["tp1_percentage"],
                     trailing_delta=params["tp1_percentage"]
@@ -519,11 +524,13 @@ class SignalExecutorController(ControllerBase):
                 take_profit_order_type=OrderType.MARKET,
                 stop_loss_order_type=OrderType.MARKET,
                 time_limit_order_type=OrderType.MARKET,
-                partial_take_profit=self.config.partial_take_profit_ratio,
             )
 
+            # get current trading pair price
+            current_price = self._market_data_provider.get_price_by_type(self.config.connector_name, pair, PriceType.MidPrice)
+            
             # Create unique key for this position
-            level_key = f"{pair}_tp2_trailing_{current_time}_{sig_hash}"
+            level_key = f"{pair}_{current_time}_{sig_hash}"
 
             # Create position executor config
             side = TradeType.BUY if signal["side"].upper() == "BUY" else TradeType.SELL
@@ -543,10 +550,13 @@ class SignalExecutorController(ControllerBase):
             # Register this executor
             self._registry[level_key] = cfg
             self.logger().info(
-                f"Registered executor for {level_key} with TP2: {signal['take_profits'][1]}, "
-                f"partial take profit: {self.config.partial_take_profit_ratio * 100}%, "
-                f"trailing delta: {params['tp1_percentage'] * 100}%, "
-                f"time limit: {self.config.time_limit_seconds} seconds"
+                f"Registered new executor with level key {level_key} "
+                f"{pair} Current price: {current_price} ,"
+                f"Buy range:[{cfg.entry_price*(1-cfg.activation_bounds[0])},{cfg.entry_price*(1+cfg.activation_bounds[1])}] , "
+                f"TP:{tp_barrier.take_profit *100} %, "
+                f"trailing activation: {tp_barrier.trailing_stop.activation_price * 100}%, "
+                f"trailing delta: {tp_barrier.trailing_stop.trailing_delta * 100}%, "
+                f"time limit: {tp_barrier.time_limit} seconds"
             )
 
         except Exception as e:
