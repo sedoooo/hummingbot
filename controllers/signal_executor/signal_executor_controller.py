@@ -422,6 +422,15 @@ class SignalExecutorController(ControllerBase):
                 if sl_price <= buy_high:
                     return False, f"Stop loss must be above buy range for SELL: {sl_price} <= {buy_high}"
 
+            # SL must be within 4 % of buy-high
+            max_sl_dist = buy_high * Decimal("0.04")
+            if side == "BUY":
+                if sl_price < buy_high - max_sl_dist:
+                    return False, f"SL > 4 % below buy-high: {sl_price}"
+            else:  # SELL
+                if sl_price > buy_high + max_sl_dist:
+                    return False, f"SL > 4 % above buy-high: {sl_price}"
+
             tp_prices = [Decimal(str(p)) for p in signal["take_profits"]]
             if not tp_prices or len(tp_prices) < 2:
                 return False, f"Invalid take profit input: {tp_prices}"
@@ -431,11 +440,27 @@ class SignalExecutorController(ControllerBase):
 
             # Direction-aware take profit validation
             if side == "BUY":
-                if tp1 <= buy_high or tp2 <= tp1:
-                    return False, f"Invalid take profit levels for BUY: {tp_prices}"
+                if any(tp <= buy_high for tp in tp_prices):
+                    return False, f"All TPs must be above buy-high for BUY: {tp_prices}"
             else:  # SELL
-                if tp1 >= buy_low or tp2 >= tp1:
-                    return False, f"Invalid take profit levels for SELL: {tp_prices}"
+                if any(tp >= buy_low for tp in tp_prices):
+                    return False, f"All TPs must be below buy-low for SELL: {tp_prices}"
+
+            # only TP1 must be within 10 % of buy-low
+            gap = abs(tp1 - buy_low) / buy_low
+            if gap > Decimal("0.10"):
+                return False, f"TP1 > 10 % from buy-low: {gap*100:.2f}%"
+
+            # TP spacing check: each TP must be ≤ 10 % away from the next one
+            for i in range(len(tp_prices) - 1):
+                prev_price = tp_prices[i]
+                next_price = tp_prices[i + 1]
+                gap = abs(next_price - prev_price) / prev_price
+                if gap > Decimal("0.10"):
+                    return False, (
+                        f"TP spacing > 10 %: "
+                        f"{gap * 100:.2f}% between {prev_price} and {next_price}"
+                    )
 
             ttl = int(signal["trading_time"])
             if not ttl or ttl <= 0:
@@ -445,7 +470,6 @@ class SignalExecutorController(ControllerBase):
             return False, f"Data type error: {str(e)}"
 
         return True, "Valid signal"
-
     def _calculate_position_parameters(self, signal: dict) -> dict:
         """Calculate position parameters from signal"""
         buy_low, buy_high = map(Decimal, signal["buy_range"])
@@ -503,6 +527,7 @@ class SignalExecutorController(ControllerBase):
 
         # Validate signal
         is_valid, error_msg = self._validate_signal(signal)
+        
         if not is_valid:
             self.logger().error(f"Invalid signal: {error_msg} in signal: {signal}")
             return
@@ -520,10 +545,17 @@ class SignalExecutorController(ControllerBase):
                 self.logger().info(f"Executor for {pair} already active – skipping duplicate pair signal")
                 return
 
+            # get current trading pair price
+            current_price = self._market_data_provider.get_price_by_type(self.config.connector_name, pair, PriceType.MidPrice)
 
-            # Calculate position parameters
-            params = self._calculate_position_parameters(signal)
-
+            #check if the SL is less than the current price
+            if params["sl_percentage"] > current_price:
+                self.logger().info(f"Stop loss {params['sl_percentage']} is greater than current price {current_price} – skipping signal")
+                return
+            
+            # Create unique key for this position
+            level_key = f"{pair}_{current_time}_{sig_hash}"
+            
             # Create triple barrier config
             tp_barrier = TripleBarrierConfig(
                 stop_loss=params["sl_percentage"],
@@ -538,12 +570,6 @@ class SignalExecutorController(ControllerBase):
                 stop_loss_order_type=OrderType.MARKET,
                 time_limit_order_type=OrderType.MARKET,
             )
-
-            # get current trading pair price
-            current_price = self._market_data_provider.get_price_by_type(self.config.connector_name, pair, PriceType.MidPrice)
-            
-            # Create unique key for this position
-            level_key = f"{pair}_{current_time}_{sig_hash}"
 
             # Create position executor config
             side = TradeType.BUY if signal["side"].upper() == "BUY" else TradeType.SELL
